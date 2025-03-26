@@ -7,6 +7,7 @@ import socket
 import random
 import threading
 import queue
+import requests  # Add this line
 import imaplib
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox, simpledialog
@@ -135,6 +136,7 @@ class SMTPChecker:
                 self.log(f"Worker error: {str(e)}")
     
     def start_checking(self, credentials, server, port, protocol="smtp", threads=5, delay=1, use_ssl=True, timeout=10):
+        self.update_ip_info()
         if self.is_running:
             return False
         
@@ -302,7 +304,27 @@ class EmailCheckerGUI:
         
         self.ssl_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.server_frame, text="Use SSL", variable=self.ssl_var).grid(row=1, column=5, padx=5, sticky=tk.W)
-        
+                # Add after control_frame.pack(fill=tk.X, pady=5)
+        ip_frame = ttk.LabelFrame(control_frame, text="Connection Info", padding=5)
+        ip_frame.pack(fill=tk.X, pady=5)
+
+        # IP info variables
+        self.ip_var = tk.StringVar(value="Not checked")
+        self.country_var = tk.StringVar(value="Not checked")
+        self.isp_var = tk.StringVar(value="Not checked")
+
+        # IP info labels
+        ttk.Label(ip_frame, text="IP Address:").grid(row=0, column=0, padx=5, sticky=tk.W)
+        ttk.Label(ip_frame, textvariable=self.ip_var).grid(row=0, column=1, padx=5, sticky=tk.W)
+
+        ttk.Label(ip_frame, text="Country:").grid(row=1, column=0, padx=5, sticky=tk.W)
+        ttk.Label(ip_frame, textvariable=self.country_var).grid(row=1, column=1, padx=5, sticky=tk.W)
+
+        ttk.Label(ip_frame, text="ISP:").grid(row=2, column=0, padx=5, sticky=tk.W)
+        ttk.Label(ip_frame, textvariable=self.isp_var).grid(row=2, column=1, padx=5, sticky=tk.W)
+
+        ttk.Button(ip_frame, text="Check IP", command=self.update_ip_info).grid(row=3, column=0, columnspan=2, pady=5)
+
         def update_protocol(*args):
             protocol = self.protocol_var.get()
             if protocol == "smtp":
@@ -538,6 +560,24 @@ class EmailCheckerGUI:
         except Exception as e:
             self.log_message(f"Error pasting from clipboard: {str(e)}")
     
+    def update_ip_info(self):
+        """Update the IP information display."""
+        try:
+            response = requests.get('http://ip-api.com/json/', timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                self.ip_var.set(data.get('query', 'Unknown'))
+                self.country_var.set(data.get('country', 'Unknown'))
+                self.isp_var.set(data.get('isp', 'Unknown'))
+                self.log_message(f"IP: {data.get('query')} ({data.get('country')}) - {data.get('isp')}")
+            else:
+                self.log_message("Failed to fetch IP info")
+        except Exception as e:
+            self.log_message(f"Error getting IP info: {str(e)}")
+            self.ip_var.set("Error")
+            self.country_var.set("Error")
+            self.isp_var.set("Error")
+
     def save_settings(self):
         self.log_message("Settings saved")
     
