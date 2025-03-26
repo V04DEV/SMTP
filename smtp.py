@@ -41,102 +41,7 @@ class SMTPChecker:
             self.log("Warning: imaplib module not available. IMAP support will be limited.")
             self.imaplib = None
     
-    def check_credentials(self, email, password, server, port, protocol="smtp", use_ssl=True, timeout=10):
-        try:
-            context = ssl.create_default_context()
-
-            if protocol.lower() == "smtp":
-                if use_ssl:
-                    server_class = smtplib.SMTP_SSL
-                else:
-                    server_class = smtplib.SMTP
-                
-                with server_class(server, port, context=context, timeout=timeout) as smtp_server:
-                    if not use_ssl:
-                        smtp_server.starttls(context=context)
-                    smtp_server.login(email, password)
-                    return email, password, "SUCCESS", None
-            
-            elif protocol.lower() == "imap":
-                if not hasattr(self, 'imaplib') or self.imaplib is None:
-                    return email, password, "ERROR", "IMAP support not available"
-                
-                if use_ssl:
-                    imap_server = self.imaplib.IMAP4_SSL(server, port, ssl_context=context)
-                else:
-                    imap_server = self.imaplib.IMAP4(server, port)
-                    if hasattr(imap_server, 'starttls'):
-                        imap_server.starttls(ssl_context=context)
-                
-                imap_server.login(email, password)
-                imap_server.logout()
-                return email, password, "SUCCESS", None
-            
-            else:
-                return email, password, "ERROR", f"Unknown protocol: {protocol}"
-                
-        except (smtplib.SMTPAuthenticationError) as e:
-            return email, password, "FAILED", "Authentication failed"
-        except Exception as e:
-            if hasattr(self, 'imaplib') and self.imaplib is not None and protocol.lower() == "imap":
-                if isinstance(e, self.imaplib.IMAP4.error) and ("Invalid credentials" in str(e) or "Authentication failed" in str(e)):
-                    return email, password, "FAILED", "Authentication failed"
-            
-            if "Authentication failed" in str(e) or "Invalid credentials" in str(e) or "authentication failed" in str(e).lower():
-                return email, password, "FAILED", "Authentication failed"
-                
-            if "timeout" in str(e).lower():
-                return email, password, "ERROR", "Connection timed out"
-                
-            return email, password, "ERROR", f"{protocol.upper()} error: {str(e)}"
-    
-    def worker(self, server, port, protocol, use_ssl, timeout, delay):
-        while not self.stop_event.is_set():
-            try:
-                try:
-                    email, password = self.queue.get(timeout=1)
-                except queue.Empty:
-                    continue
-                
-                self.pause_event.wait()
-                
-                if self.stop_event.is_set():
-                    self.queue.task_done()
-                    break
-                
-                result = self.check_credentials(
-                    email, password, server, port, 
-                    protocol=protocol, use_ssl=use_ssl, 
-                    timeout=timeout
-                )
-                email, password, status, error = result
-                
-                if status == "SUCCESS":
-                    self.results['valid'] += 1
-                    self.valid_credentials.append(f"{email}:{password}")
-                    self.log(f"[+] VALID: {email}")
-                elif status == "FAILED":
-                    self.results['invalid'] += 1
-                    self.error_credentials.append(f"{email}:{password} - {error}")
-                    self.log(f"[-] INVALID: {email}")
-                else:
-                    self.results['errors'] += 1
-                    self.error_credentials.append(f"{email}:{password} - {error}")
-                    self.log(f"[!] ERROR: {email} - {error}")
-                
-                if self.callback:
-                    self.callback(self.results)
-                
-                self.queue.task_done()
-                
-                if delay > 0:
-                    time.sleep(delay)
-                    
-            except Exception as e:
-                self.log(f"Worker error: {str(e)}")
-    
     def start_checking(self, credentials, server, port, protocol="smtp", threads=5, delay=1, use_ssl=True, timeout=10):
-        self.update_ip_info()
         if self.is_running:
             return False
         
@@ -560,28 +465,15 @@ class EmailCheckerGUI:
         except Exception as e:
             self.log_message(f"Error pasting from clipboard: {str(e)}")
     
-    def update_ip_info(self):
-        """Update the IP information display."""
-        try:
-            response = requests.get('http://ip-api.com/json/', timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                self.ip_var.set(data.get('query', 'Unknown'))
-                self.country_var.set(data.get('country', 'Unknown'))
-                self.isp_var.set(data.get('isp', 'Unknown'))
-                self.log_message(f"IP: {data.get('query')} ({data.get('country')}) - {data.get('isp')}")
-            else:
-                self.log_message("Failed to fetch IP info")
-        except Exception as e:
-            self.log_message(f"Error getting IP info: {str(e)}")
-            self.ip_var.set("Error")
-            self.country_var.set("Error")
-            self.isp_var.set("Error")
+
 
     def save_settings(self):
         self.log_message("Settings saved")
     
     def start_checking(self):
+        # Update IP info before starting
+        self.update_ip_info()
+        
         cred_text = self.credentials_text.get(1.0, tk.END).strip()
         if not cred_text:
             messagebox.showwarning("Warning", "No credentials to check")
@@ -693,6 +585,24 @@ class EmailCheckerGUI:
         
         self.log_text.insert(tk.END, f"[{current_time}] {message}\n")
         self.log_text.see(tk.END)
+
+    def update_ip_info(self):
+        """Update the IP information display."""
+        try:
+            response = requests.get('http://ip-api.com/json/', timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                self.ip_var.set(data.get('query', 'Unknown'))
+                self.country_var.set(data.get('country', 'Unknown'))
+                self.isp_var.set(data.get('isp', 'Unknown'))
+                self.log_message(f"IP: {data.get('query')} ({data.get('country')}) - {data.get('isp')}")
+            else:
+                self.log_message("Failed to fetch IP info")
+        except Exception as e:
+            self.log_message(f"Error getting IP info: {str(e)}")
+            self.ip_var.set("Error")
+            self.country_var.set("Error")
+            self.isp_var.set("Error")
 
 def main():
     missing_libs = []
