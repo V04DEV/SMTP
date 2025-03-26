@@ -991,6 +991,12 @@ class EmailCheckerGUI:
         self.log_text.insert(tk.END, f"[{current_time}] {message}\n")
         self.log_text.see(tk.END)  # Scroll to end
 
+    def refresh_proxy_settings(self):
+        """Refresh proxy settings and update the label"""
+        self.checker.proxy_manager.update_system_proxy()
+        proxy_info = self.checker.proxy_manager.get_proxy_info()
+        self.proxy_info_var.set(proxy_info)
+
 def main():
     """Main function to run the app"""
     # Check for required libraries first
