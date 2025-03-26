@@ -14,33 +14,44 @@ from tkinter.font import Font
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from tkinter.font import Font
+import urllib.request
+import winreg
 
 class ProxyManager:
     def __init__(self):
-        self.proxies = []
-        self.current_index = 0
-        self.lock = threading.Lock()
+        self.system_proxy = None
+        self.update_system_proxy()
     
-    def load_from_file(self, file_path):
+    def update_system_proxy(self):
+        """Get Windows system proxy settings"""
         try:
-            with open(file_path, 'r') as f:
-                self.proxies = [line.strip() for line in f if line.strip()]
-            return len(self.proxies)
+            reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                   "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                                   0, winreg.KEY_READ)
+            proxy_enable = winreg.QueryValueEx(reg_key, "ProxyEnable")[0]
+            if proxy_enable:
+                proxy_server = winreg.QueryValueEx(reg_key, "ProxyServer")[0]
+                self.system_proxy = proxy_server
+            else:
+                self.system_proxy = None
+            winreg.CloseKey(reg_key)
+        except Exception:
+            self.system_proxy = None
+
+    def get_current_ip(self):
+        """Get current IP address to verify proxy"""
+        try:
+            # Use a service that returns the IP address
+            response = urllib.request.urlopen('https://api.ipify.org')
+            return response.read().decode('utf-8')
         except Exception as e:
-            return f"Error loading proxies: {str(e)}"
-    
-    def load_from_text(self, text):
-        self.proxies = [line.strip() for line in text.split('\n') if line.strip()]
-        return len(self.proxies)
-    
-    def get_next_proxy(self):
-        if not self.proxies:
-            return None
-        
-        with self.lock:
-            proxy = self.proxies[self.current_index]
-            self.current_index = (self.current_index + 1) % len(self.proxies)
-            return proxy
+            return f"Error getting IP: {str(e)}"
+
+    def get_proxy_info(self):
+        """Return current proxy information"""
+        if self.system_proxy:
+            return f"System Proxy: {self.system_proxy}"
+        return "No system proxy configured"
 
 class UserAgentManager:
     def __init__(self):
@@ -110,17 +121,25 @@ class SMTPChecker:
             protocol: "smtp" or "imap"
         """
         user_agent = self.ua_manager.get_random_user_agent()
-        proxy = self.proxy_manager.get_next_proxy() if use_proxy and self.proxy_manager.proxies else None
         
         try:
             # Create a secure context
             context = ssl.create_default_context()
             
-            # Apply proxy if needed
-            if proxy and ':' in proxy:
-                proxy_host, proxy_port = proxy.split(':')
-                socket.socket = socksify(proxy_host, int(proxy_port))
+            # Apply system proxy if enabled
+            if use_proxy and self.proxy_manager.system_proxy:
+                proxy_handler = urllib.request.ProxyHandler({
+                    'http': f'http://{self.proxy_manager.system_proxy}',
+                    'https': f'http://{self.proxy_manager.system_proxy}'
+                })
+                opener = urllib.request.build_opener(proxy_handler)
+                urllib.request.install_opener(opener)
             
+            # Log current IP for verification
+            current_ip = self.proxy_manager.get_current_ip()
+            self.log(f"Current IP: {current_ip}")
+            self.log(self.proxy_manager.get_proxy_info())
+
             if protocol.lower() == "smtp":
                 # SMTP authentication
                 if use_ssl:
@@ -170,8 +189,9 @@ class SMTPChecker:
             return email, password, "ERROR", f"{protocol.upper()} error: {str(e)}"
         finally:
             # Reset socket if using proxy
-            if proxy:
-                socket.socket = socket._real_socket
+            if use_proxy and self.proxy_manager.system_proxy:
+                # Restore default opener
+                urllib.request.install_opener(None)
     
     def worker(self, server, port, protocol, use_ssl, use_proxy, timeout, delay):
         """Worker thread that processes credentials from the queue"""
@@ -540,60 +560,33 @@ class EmailCheckerGUI:
         self.timeout_var = tk.IntVar(value=10)
         ttk.Spinbox(conn_frame, from_=1, to=60, textvariable=self.timeout_var, width=5).grid(row=0, column=1, padx=5, sticky=tk.W)
         
-        # Proxy settings
-        proxy_frame = ttk.LabelFrame(settings_frame, text="Proxy", padding=5)
+        # System Proxy settings
+        proxy_frame = ttk.LabelFrame(settings_frame, text="System Proxy", padding=5)
         proxy_frame.pack(fill=tk.X, pady=5)
         
         self.use_proxy_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(proxy_frame, text="Use Proxy", variable=self.use_proxy_var).pack(anchor=tk.W, padx=5)
+        ttk.Checkbutton(proxy_frame, text="Use System Proxy", variable=self.use_proxy_var).pack(anchor=tk.W, padx=5)
+        ttk.Label(proxy_frame, text="Note: Uses Windows system proxy settings").pack(anchor=tk.W, padx=5)
+        
+        # Add refresh proxy button
+        ttk.Button(proxy_frame, text="Refresh Proxy Settings", 
+                  command=lambda: self.refresh_proxy_settings()).pack(pady=5)
+        
+        # Add proxy info label
+        self.proxy_info_var = tk.StringVar(value="")
+        ttk.Label(proxy_frame, textvariable=self.proxy_info_var).pack(anchor=tk.W, padx=5)
+        
+        # Update proxy info
+        self.refresh_proxy_settings()
         
         # Save settings button
         ttk.Button(settings_frame, text="Save Settings", command=self.save_settings).pack(pady=10)
     
     def setup_proxy_tab(self):
-        # Create proxy frame
-        proxy_frame = ttk.Frame(self.proxy_tab, padding=10)
-        proxy_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Proxy list section
-        proxy_list_frame = ttk.LabelFrame(proxy_frame, text="Proxy List", padding=5)
-        proxy_list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        # Buttons for proxy list
-        proxy_btn_frame = ttk.Frame(proxy_list_frame)
-        proxy_btn_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Button(proxy_btn_frame, text="Import File", command=self.import_proxy_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(proxy_btn_frame, text="Clear", command=lambda: self.proxy_text.delete(1.0, tk.END)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(proxy_btn_frame, text="Copy", command=lambda: self.copy_to_clipboard(self.proxy_text.get(1.0, tk.END))).pack(side=tk.LEFT, padx=2)
-        ttk.Button(proxy_btn_frame, text="Paste", command=lambda: self.paste_from_clipboard(self.proxy_text)).pack(side=tk.LEFT, padx=2)
-        
-        # Proxy list text area
-        ttk.Label(proxy_list_frame, text="Enter proxies in format: host:port").pack(anchor=tk.W)
-        self.proxy_text = scrolledtext.ScrolledText(proxy_list_frame, height=10)
-        self.proxy_text.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        # User Agent section
-        ua_frame = ttk.LabelFrame(proxy_frame, text="User Agents", padding=5)
-        ua_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        # Buttons for user agents
-        ua_btn_frame = ttk.Frame(ua_frame)
-        ua_btn_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Button(ua_btn_frame, text="Import File", command=self.import_ua_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ua_btn_frame, text="Clear", command=lambda: self.ua_text.delete(1.0, tk.END)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ua_btn_frame, text="Copy", command=lambda: self.copy_to_clipboard(self.ua_text.get(1.0, tk.END))).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ua_btn_frame, text="Paste", command=lambda: self.paste_from_clipboard(self.ua_text)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ua_btn_frame, text="Load Defaults", command=self.load_default_ua).pack(side=tk.LEFT, padx=2)
-        
-        # User agent text area
-        ttk.Label(ua_frame, text="Enter one User Agent per line").pack(anchor=tk.W)
-        self.ua_text = scrolledtext.ScrolledText(ua_frame, height=10)
-        self.ua_text.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        # Apply button
-        ttk.Button(proxy_frame, text="Apply", command=self.apply_proxy_settings).pack(pady=10)
+        # Remove proxy tab elements
+        for widget in self.proxy_tab.winfo_children():
+            widget.destroy()
+        ttk.Label(self.proxy_tab, text="System Proxy is configured in Windows Settings").pack(padx=10, pady=10)
     
     def setup_about_tab(self):
         # Create about frame
@@ -802,22 +795,8 @@ class EmailCheckerGUI:
     
     
     def import_proxy_file(self):
-        """Import proxy list from file"""
-        file_path = filedialog.askopenfilename(
-            title="Select Proxy File",
-            filetypes=(("Text files", "*.txt"), ("All files", "*.*"))
-        )
-        
-        if file_path:
-            try:
-                with open(file_path, 'r') as f:
-                    content = f.read()
-                
-                self.proxy_text.delete(1.0, tk.END)
-                self.proxy_text.insert(tk.END, content)
-                self.log_message(f"Imported proxies from {file_path}")
-            except Exception as e:
-                messagebox.showerror("Import Error", f"Error importing file: {str(e)}")
+        # Remove proxy file import
+        pass
     
     def import_ua_file(self):
         """Import user agents from file"""
@@ -845,16 +824,8 @@ class EmailCheckerGUI:
         self.log_message("Loaded default user agents")
     
     def apply_proxy_settings(self):
-        """Apply proxy and user agent settings"""
-        # Apply proxy settings
-        proxy_text = self.proxy_text.get(1.0, tk.END).strip()
-        proxy_count = self.checker.proxy_manager.load_from_text(proxy_text)
-        
-        # Apply user agent settings
-        ua_text = self.ua_text.get(1.0, tk.END).strip()
-        ua_count = self.checker.ua_manager.load_from_text(ua_text)
-        
-        self.log_message(f"Applied {proxy_count} proxies and {ua_count} user agents")
+        # Remove proxy settings application
+        pass
     
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
@@ -1014,47 +985,10 @@ class EmailCheckerGUI:
         self.log_text.insert(tk.END, f"[{current_time}] {message}\n")
         self.log_text.see(tk.END)  # Scroll to end
 
-def socksify(host, port):
-    """Create a socket that connects through a SOCKS proxy"""
-    import socks
-    
-    # Store the original socket
-    socket._real_socket = socket.socket
-    
-    # Replace socket with proxied version
-    def create_connection(address, timeout=None, source_address=None):
-        sock = socks.socksocket()
-        sock.set_proxy(socks.SOCKS5, host, port)
-        if timeout:
-            sock.settimeout(timeout)
-        if source_address:
-            sock.bind(source_address)
-        sock.connect(address)
-        return sock
-    
-    # Create a new socket subclass
-    class ProxiedSocket(socket.socket):
-        def __init__(self, *args, **kwargs):
-            socket._real_socket.__init__(self, *args, **kwargs)
-        
-        def connect(self, address):
-            self.sock = create_connection(address, self.gettimeout())
-            return self.sock
-    
-    socket.socket = ProxiedSocket
-    return socket.socket
-
 def main():
     """Main function to run the app"""
     # Check for required libraries first
     missing_libs = []
-    
-    try:
-        import socks
-    except ImportError:
-        missing_libs.append("PySocks")
-        print("PySocks not installed. Proxy support will be disabled.")
-        print("Install it with: pip install PySocks")
     
     try:
         import imaplib
