@@ -67,6 +67,75 @@ class SMTPChecker:
         
         return True
     
+    def worker(self, server, port, protocol, use_ssl, timeout, delay):
+        while not self.stop_event.is_set():
+            # Wait if paused
+            self.pause_event.wait()
+            
+            try:
+                # Get a credential from the queue with a timeout
+                email, password = self.queue.get(timeout=1)
+            except queue.Empty:
+                break
+                
+            try:
+                is_valid = False
+                error = None
+                
+                if protocol == "smtp":
+                    is_valid, error = self.check_smtp(email, password, server, port, use_ssl, timeout)
+                else:
+                    error = "Unsupported protocol"
+                
+                # Update results based on check outcome
+                if is_valid:
+                    self.valid_credentials.append(f"{email}:{password}")
+                    self.results['valid'] += 1
+                    self.log(f"Valid: {email}:{password}")
+                else:
+                    self.results['invalid'] += 1
+                    if error:
+                        self.error_credentials.append(f"{email}:{password} - {error}")
+                        self.results['errors'] += 1
+                        self.log(f"Error: {email}:{password} - {error}")
+                    else:
+                        self.log(f"Invalid: {email}:{password}")
+                
+                # Notify callback if available
+                if self.callback:
+                    self.callback(self.results)
+                    
+            except Exception as e:
+                self.results['errors'] += 1
+                self.error_credentials.append(f"{email}:{password} - {str(e)}")
+                self.log(f"Exception: {email}:{password} - {str(e)}")
+                if self.callback:
+                    self.callback(self.results)
+            
+            finally:
+                self.queue.task_done()
+                
+            # Apply delay between checks
+            if delay > 0 and not self.stop_event.is_set():
+                time.sleep(delay)
+
+    def check_smtp(self, email, password, server, port, use_ssl, timeout):
+        try:
+            if use_ssl:
+                context = ssl.create_default_context()
+                server_obj = smtplib.SMTP_SSL(server, port, timeout=timeout, context=context)
+            else:
+                server_obj = smtplib.SMTP(server, port, timeout=timeout)
+                server_obj.starttls()
+                
+            server_obj.login(email, password)
+            server_obj.quit()
+            return True, None
+        except smtplib.SMTPAuthenticationError:
+            return False, None
+        except Exception as e:
+            return False, str(e)
+    
     def stop_checking(self):
         if not self.is_running:
             return
@@ -120,7 +189,7 @@ class SMTPChecker:
         except Exception as e:
             self.log(f"Error saving results: {str(e)}")
             return False
-
+        
 class EmailCheckerGUI:
     def __init__(self, root):
         self.root = root
